@@ -1,5 +1,6 @@
 import sys
 import json
+import logging
 import waitress
 from threading import Thread
 from waitress.channel import HTTPChannel
@@ -7,7 +8,9 @@ from waitress.utilities import BadRequest
 from waitress.task import WSGITask, ErrorTask
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 
-__version__ = "0.1"
+__version__ = "1.0"
+
+logger = logging.getLogger(__name__)
 
 
 def parse_environment(environ):
@@ -20,8 +23,8 @@ def parse_environment(environ):
             key.replace("HTTP_", "", 1).replace("_", "-").title(): value for key, value in
             filter(lambda kv: kv[0].startswith("HTTP_"), environ.items())
         },
-        "body": environ["wsgi.input"].read().decode("utf-8"),
-        "request": environ["RAW_REQUEST"].decode("utf-8")
+        "body": environ["wsgi.input"],
+        "request": environ["RAW_REQUEST"]
     }
     if "CONTENT_LENGTH" in environ:
         response_json["headers"]["Content-Length"] = environ["CONTENT_LENGTH"]
@@ -50,7 +53,20 @@ class RawWSGITask(WSGITask):
     def get_environment(self):
         environ = super(RawWSGITask, self).get_environment()
         environ["RAW_REQUEST"] = bytes(self.channel.data)
+        logger.info(f"RAW_REQUEST: {environ['RAW_REQUEST']}")
         return environ
+
+
+class JSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (bytes, bytearray)):
+            return obj.decode("utf-8")
+        elif hasattr(obj, "tell") and hasattr(obj, "read") and hasattr(obj, "seek"):
+            index = obj.tell()
+            value = obj.read()
+            obj.seek(index)
+            return self.default(value)
+        return super().default(obj)
 
 
 class RawErrorTask(ErrorTask):
@@ -63,17 +79,11 @@ class RawErrorTask(ErrorTask):
         if environ is not None:
             return environ
 
-        if not hasattr(self.request, "path"):
-            self.request.path = ""
-
-        if not hasattr(self.request, "command"):
-            self.request.command = ""
-
-        if not hasattr(self.request, "query"):
-            self.request.query = ""
-
-        if not hasattr(self.request, "url_scheme"):
-            self.request.url_scheme = ""
+        self.request.path = getattr(self.request, "path", "")
+        self.request.command = getattr(self.request, "command", "")
+        self.request.query = getattr(self.request, "query", "")
+        self.request.url_scheme = getattr(self.request, "url_scheme", "")
+        self.request.request_uri = getattr(self.request, "request_uri", "")
 
         environ = RawWSGITask(self.channel, self.request).get_environment()
         self.environ = environ
@@ -83,10 +93,10 @@ class RawErrorTask(ErrorTask):
         environ = self.get_environment()
         environ["RAW_REQUEST"] = bytes(self.channel.data)
 
-        e = self.request.error
-        status, headers, environ["ERROR"] = e.to_response()
+        error = self.request.error
+        status, headers, environ["ERROR"] = error.to_response()
 
-        body = json.dumps(parse_environment(environ), indent=2).encode("utf-8")
+        body = json.dumps(parse_environment(environ), cls=JSONEncoder, indent=2).encode("utf-8")
         headers = dict(headers)
         headers.update({
             "Content-Type": "application/json"
@@ -115,7 +125,8 @@ class RawHTTPChannel(HTTPChannel):
 
 
 class RawHTTPEchoServer(Thread):
-    def __init__(self, host="127.0.0.1", port=8000, scheme="http", channel_timeout=5, reset_on_timeout=False, **kwargs):
+    def __init__(self, host="127.0.0.1", port=8000, scheme="http",
+                 channel_timeout=5, reset_on_timeout=False, **kwargs):
         super(RawHTTPEchoServer, self).__init__(**kwargs)
         self.server = waitress.create_server(
             application=self.request_handler,
@@ -133,7 +144,7 @@ class RawHTTPEchoServer(Thread):
             "Content-Type": "application/json"
         }.items()
 
-        body_bytes = json.dumps(parse_environment(environ), indent=2).encode("utf-8")
+        body_bytes = json.dumps(parse_environment(environ), cls=JSONEncoder, indent=2).encode("utf-8")
         start_response(status_text, response_headers)
         return [body_bytes]
 
@@ -177,7 +188,18 @@ def main(args=None):
     parser.add_argument("-r", "--reset-on-timeout",
                         help="reset on timeout",
                         action="store_true")
+    parser.add_argument("-V", "--verbose",
+                        help="verbose",
+                        action="store_true")
 
     sys_args = vars(parser.parse_args(args=args))
+    verbose = sys_args.pop("verbose", False)
+
+    logger.setLevel(logging.DEBUG if verbose else logging.INFO)
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter()
+    handler.setFormatter(fmt=formatter)
+    logger.addHandler(hdlr=handler)
+
     server = RawHTTPEchoServer(**sys_args)
     server.run()
