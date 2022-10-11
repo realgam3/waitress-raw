@@ -119,7 +119,7 @@ class RawHTTPChannel(HTTPChannel):
         self.data = b""
 
     def received(self, data):
-        self.data = data
+        self.data += data
         res = super(RawHTTPChannel, self).received(data)
         return res
 
