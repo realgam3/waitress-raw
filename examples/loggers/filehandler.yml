@@ -1,7 +1,7 @@
 logging:
   - handler: logging.FileHandler
     args:
-      filename: "/tmp/waitress-raw.log"
+      filename: "waitress-raw.log"
       mode: "a"
       encoding: "utf-8"
     format: "%(request)s"
