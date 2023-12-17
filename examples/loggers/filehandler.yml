@@ -1,0 +1,11 @@
+logging:
+  - handler: logging.FileHandler
+    args:
+      filename: "request-logs.log"
+      mode: "a"
+      encoding: "utf-8"
+    format: "%(request)s"
+
+waitress:
+  connection_limit: 100
+  threads: 25

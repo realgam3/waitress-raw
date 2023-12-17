@@ -1,7 +1,12 @@
 import sys
+import yaml
 import json
 import logging
 import waitress
+import importlib
+from io import BytesIO
+from pathlib import Path
+from copy import deepcopy
 from threading import Thread
 from waitress.channel import HTTPChannel
 from waitress.utilities import BadRequest
@@ -34,6 +39,27 @@ def parse_environment(environ):
     if "ERROR" in environ:
         response_json["error"] = environ["ERROR"]
 
+    try:
+        to_log = deepcopy(response_json)
+        headers = to_log.pop("headers") or {}
+        for key, value in headers.items():
+            header_name = key.lower()
+            if header_name not in ["x-request-id", "x-test", "x-gotestwaf-test", "x-debug-id"]:
+                continue
+            to_log[header_name] = value
+
+        body = to_log.pop("body") or BytesIO()
+        index = body.tell()
+        value = body.read()
+        body.seek(index)
+
+        to_log["headers"] = json.dumps(headers)
+        to_log["body"] = repr(value)
+        to_log["request"] = repr(to_log.pop("request") or "")
+        logger.info("request", extra=to_log)
+    except Exception as e:
+        logger.exception(f"Failed to log request: {e}")
+
     return response_json
 
 
@@ -53,14 +79,15 @@ class RawWSGITask(WSGITask):
     def get_environment(self):
         environ = super(RawWSGITask, self).get_environment()
         environ["RAW_REQUEST"] = bytes(self.channel.data)
-        logger.info(f"RAW_REQUEST: {environ['RAW_REQUEST']}")
+        if hasattr(self.channel, "data"):
+            self.channel.data = b""
         return environ
 
 
 class JSONEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, (bytes, bytearray)):
-            return obj.decode("utf-8")
+            return obj.decode("utf-8", errors="backslashreplace")
         elif hasattr(obj, "tell") and hasattr(obj, "read") and hasattr(obj, "seek"):
             index = obj.tell()
             value = obj.read()
@@ -96,7 +123,9 @@ class RawErrorTask(ErrorTask):
         error = self.request.error
         status, headers, environ["ERROR"] = error.to_response()
 
-        body = json.dumps(parse_environment(environ), cls=JSONEncoder, indent=2).encode("utf-8")
+        body = json.dumps(parse_environment(environ), cls=JSONEncoder, indent=2).encode(
+            "utf-8", errors="backslashreplace"
+        )
         headers = dict(headers)
         headers.update({
             "Content-Type": "application/json"
@@ -126,12 +155,16 @@ class RawHTTPChannel(HTTPChannel):
 
 class RawHTTPEchoServer(Thread):
     def __init__(self, host="127.0.0.1", port=8000, scheme="http",
-                 channel_timeout=5, reset_on_timeout=False, **kwargs):
-        super(RawHTTPEchoServer, self).__init__(**kwargs)
+                 channel_timeout=5, reset_on_timeout=False, config=None):
+        config = config or {}
+        thread_config = config.get("thread", {})
+        super().__init__(**thread_config)
+        waitress_config = config.get("waitress", {})
         self.server = waitress.create_server(
             application=self.request_handler,
             host=host, port=port, url_scheme=scheme,
-            channel_timeout=channel_timeout
+            channel_timeout=channel_timeout,
+            **waitress_config,
         )
         self.server.channel_class = RawHTTPChannel
         self.server.__class__.maintenance = maintenance
@@ -144,7 +177,9 @@ class RawHTTPEchoServer(Thread):
             "Content-Type": "application/json"
         }.items()
 
-        body_bytes = json.dumps(parse_environment(environ), cls=JSONEncoder, indent=2).encode("utf-8")
+        body_bytes = json.dumps(parse_environment(environ), cls=JSONEncoder, indent=2).encode(
+            "utf-8", errors="backslashreplace"
+        )
         start_response(status_text, response_headers)
         return [body_bytes]
 
@@ -160,6 +195,30 @@ class RawHTTPEchoServer(Thread):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.stop()
+
+
+def configure_logging_handlers(loggers):
+    for handler_config in loggers:
+        module_name, class_name = handler_config["handler"].rsplit(".", 1)
+        try:
+            module = importlib.import_module(module_name, module_name)
+            handler_class = getattr(module, class_name, None)
+            if not issubclass(handler_class, logging.Handler):
+                return ValueError()
+        except Exception:
+            raise NotImplementedError("Could not load logging handler")
+
+        args = handler_config.get("args", {})
+        handler = handler_class(**args)
+
+        fmt = handler_config.get("format")
+        if fmt:
+            formatter = logging.Formatter(
+                fmt=fmt,
+            )
+            handler.setFormatter(fmt=formatter)
+
+        logger.addHandler(handler)
 
 
 def main(args=None):
@@ -191,15 +250,22 @@ def main(args=None):
     parser.add_argument("-V", "--verbose",
                         help="verbose",
                         action="store_true")
-
+    parser.add_argument("-c", "--config",
+                        help="config path",
+                        dest="config_path",
+                        default="config.yml")
     sys_args = vars(parser.parse_args(args=args))
-    verbose = sys_args.pop("verbose", False)
 
+    config = {}
+    config_path = Path(sys_args.pop("config_path"))
+    if config_path.exists():
+        config = yaml.safe_load(config_path.read_text())
+    sys_args["config"] = config
+
+    verbose = sys_args.pop("verbose", False)
     logger.setLevel(logging.DEBUG if verbose else logging.INFO)
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter()
-    handler.setFormatter(fmt=formatter)
-    logger.addHandler(hdlr=handler)
+    loggers_config = config.get("logging", [])
+    configure_logging_handlers(loggers_config)
 
     server = RawHTTPEchoServer(**sys_args)
     server.run()

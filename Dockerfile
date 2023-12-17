@@ -1,21 +1,19 @@
-FROM python:3.9-alpine
+FROM python:3.12-alpine
 
-# Create app directory
-RUN mkdir -p /app
-WORKDIR /app
+ARG USERNAME=app
+WORKDIR /usr/src/app
 
-# Bundle app source
-COPY . /app
+COPY requirements.txt .
+RUN set -eux; \
+    \
+    pip install -r requirements.txt; \
+    \
+    adduser --disabled-password --no-create-home --gecos ${USERNAME} ${USERNAME}
 
-RUN pip install -r requirements.txt
+COPY . .
 
-# Set non root user
-RUN adduser -D -h /home/user -s /bin/bash user
-RUN chown -R user:user /home/user
-RUN chmod -R 755 .
-
-USER user
-ENV HOME /home/user
+USER ${USERNAME}
+ENV HOME=/tmp
 
 EXPOSE 5000
 CMD [ "python", "-m", "waitress_raw" ]

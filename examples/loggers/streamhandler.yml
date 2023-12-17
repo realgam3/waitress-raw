@@ -1,0 +1,7 @@
+logging:
+  - handler: logging.StreamHandler
+    format: "%(request)s"
+
+waitress:
+  connection_limit: 100
+  threads: 25
