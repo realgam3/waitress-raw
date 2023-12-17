@@ -13,7 +13,7 @@ from waitress.utilities import BadRequest
 from waitress.task import WSGITask, ErrorTask
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 
-__version__ = "1.0"
+from .__version__ import __version__
 
 logger = logging.getLogger(__name__)
 
