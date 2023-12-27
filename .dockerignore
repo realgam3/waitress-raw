@@ -11,10 +11,11 @@ __pycache__/
 build/
 dist/
 examples/
+ext/
 *.egg-info/
-config.yml
-config.yaml
+config.y*ml
 
 # Git Files
 .git/
+.github/
 .gitignore
