@@ -3,7 +3,7 @@ logging:
   disable_existing_loggers: true
   formatters:
     standard:
-      format: '%(request)s'
+      format: '%(json)s'
   handlers:
     console:
       level: INFO
@@ -19,3 +19,13 @@ logging:
 waitress:
   connection_limit: 100
   threads: 25
+
+extension:
+  source: |
+    import json
+
+    def process(log):
+        log["request"] = repr(log["request"])
+        log["body"] = repr(log["body"])
+        log["json"] = json.dumps(log)
+        return log

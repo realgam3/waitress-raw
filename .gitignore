@@ -91,3 +91,4 @@ ENV/
 # Pycharm project settings
 .idea/
 Pipfile.lock
+config.yml

@@ -3,16 +3,19 @@ import yaml
 import json
 import logging
 import waitress
-import importlib
 from io import BytesIO
 from pathlib import Path
 from copy import deepcopy
 from threading import Thread
+from types import SimpleNamespace
+from logging.config import dictConfig
 from waitress.channel import HTTPChannel
 from waitress.utilities import BadRequest
 from waitress.task import WSGITask, ErrorTask
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 
+from . import extension
+from .utils import import_path
 from .__version__ import __version__
 
 logger = logging.getLogger(__name__)
@@ -41,21 +44,15 @@ def parse_environment(environ):
 
     try:
         to_log = deepcopy(response_json)
-        headers = to_log.pop("headers") or {}
-        for key, value in headers.items():
-            header_name = key.lower()
-            if header_name not in ["x-request-id", "x-test", "x-gotestwaf-test", "x-debug-id"]:
-                continue
-            to_log[header_name] = value
-
         body = to_log.pop("body") or BytesIO()
         index = body.tell()
         value = body.read()
         body.seek(index)
 
-        to_log["headers"] = json.dumps(headers)
-        to_log["body"] = repr(value)
-        to_log["request"] = repr(to_log.pop("request") or "")
+        to_log["body"] = value
+        to_log["request"] = to_log.pop("request") or b""
+
+        to_log = extension.process(to_log)
         logger.info("request", extra=to_log)
     except Exception as e:
         logger.exception(f"Failed to log request: {e}")
@@ -197,28 +194,33 @@ class RawHTTPEchoServer(Thread):
         self.stop()
 
 
-def configure_logging_handlers(loggers):
-    for handler_config in loggers:
-        module_name, class_name = handler_config["handler"].rsplit(".", 1)
-        try:
-            module = importlib.import_module(module_name, module_name)
-            handler_class = getattr(module, class_name, None)
-            if not issubclass(handler_class, logging.Handler):
-                return ValueError()
-        except Exception:
-            raise NotImplementedError("Could not load logging handler")
+def configure_logging_handlers(loggers_config):
+    if not loggers_config:
+        return
+    dictConfig(loggers_config)
 
-        args = handler_config.get("args", {})
-        handler = handler_class(**args)
 
-        fmt = handler_config.get("format")
-        if fmt:
-            formatter = logging.Formatter(
-                fmt=fmt,
-            )
-            handler.setFormatter(fmt=formatter)
+def configure_extensions(extensions_config):
+    if not extensions_config:
+        return
 
-        logger.addHandler(handler)
+    module = None
+    if "source" in extensions_config:
+        source = extensions_config.pop("source")
+        _globals = {}
+        exec(source, _globals)
+        module = SimpleNamespace(**_globals)
+    elif "path" in extensions_config:
+        path = extensions_config.pop("path")
+        module = import_path(path)
+
+    if not module:
+        return
+
+    for function_name in ["process"]:
+        func = getattr(module, function_name, lambda *args, **kwargs: None)
+        setattr(extension, function_name, func)
+
 
 
 def main(args=None):
@@ -264,8 +266,11 @@ def main(args=None):
 
     verbose = sys_args.pop("verbose", False)
     logger.setLevel(logging.DEBUG if verbose else logging.INFO)
-    loggers_config = config.get("logging", [])
+    loggers_config = config.get("logging", {})
     configure_logging_handlers(loggers_config)
+
+    extension_config = config.get("extension", {})
+    configure_extensions(extension_config)
 
     server = RawHTTPEchoServer(**sys_args)
     server.run()

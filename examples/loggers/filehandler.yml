@@ -1,10 +1,22 @@
 logging:
-  - handler: logging.FileHandler
-    args:
+  version: 1
+  disable_existing_loggers: true
+  formatters:
+    standard:
+      format: '%(request)s'
+  handlers:
+    file:
+      level: INFO
+      formatter: standard
+      class: logging.FileHandler
       filename: "waitress-raw.log"
       mode: "a"
       encoding: "utf-8"
-    format: "%(request)s"
+  loggers:
+    "waitress_raw":
+      handlers: [file]
+      level: INFO
+      propagate: false
 
 waitress:
   connection_limit: 100
